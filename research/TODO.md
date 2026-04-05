@@ -2,16 +2,16 @@
 
 ## Must-Have Before Spec
 
-- [ ] **Android restore mechanism**: How does WhatsApp on Android detect and restore a local backup? What file path, filename, format (`msgstore.db` vs `.crypt15` wrapper)? Does it validate checksums, schema version, or triggers? What happens if validation fails?
+- [x] **Android restore mechanism**: Two paths found. Path A: encrypted `.crypt15` at `Android/media/com.whatsapp/WhatsApp/Databases/`. Path B: root — unencrypted `msgstore.db` directly in `/data/data/com.whatsapp/databases/` with correct ownership. See `06-deep-dive-remaining-gaps.md`.
 
-- [ ] **The paracycle gist**: Read the actual SQL conversion code at https://gist.github.com/paracycle/6107205. This is the iOS→Android column mapping Rosetta Stone. Document what's outdated vs still valid for current WhatsApp schema.
+- [x] **The paracycle gist**: Full SQL extracted and analyzed. Column mappings are valid but **targets legacy schema** (`messages` plural). Modern WhatsApp uses normalized `message` + satellite tables. Needs rewriting. See `06-deep-dive-remaining-gaps.md`.
 
-- [ ] **Modern message types**: Reactions, message edits, polls, disappearing messages, view-once media, channels, communities, pinned messages. What tables/columns handle these in each platform? Would they survive a naive conversion or silently vanish?
+- [x] **Modern message types**: Reactions via `message_add_on` (type 56), edits (type 74), disappearing via `message_ephemeral`. Polls and channels poorly documented. These would be lost in a naive conversion. See `06-deep-dive-remaining-gaps.md`.
 
-- [ ] **Media re-download via CDN**: The databases store `media_key` and `media_url`/`message_url`. Can media be re-downloaded from WhatsApp CDN using those keys after transfer? How long do CDN URLs stay valid? This could eliminate the need to copy media files entirely.
+- [x] **Media re-download via CDN**: **NOT viable.** URLs expire after ~30 days. Media must be extracted from source backup/device. See `06-deep-dive-remaining-gaps.md`.
 
-- [ ] **Baileys history sync payload format**: What exactly comes back in the `messaging-history.set` event? Protobuf schema? How complete is it in practice? Has anyone documented real-world completeness (e.g., "got 6 months of history" vs "got everything")?
+- [x] **Baileys history sync payload format**: Returns `proto.IWebMessageInfo` protobuf. Platform-agnostic. On-demand backfill available but best-effort. See `06-deep-dive-remaining-gaps.md`.
 
-- [ ] **WhatsApp version ↔ schema version mapping**: Which DB schema changes correspond to which WhatsApp app versions? How do we detect which schema we're dealing with? Is there a version marker in the database itself?
+- [x] **WhatsApp version ↔ schema version mapping**: No clean version marker. Detect by checking table names (`message` vs `messages`, presence of `jid` table, etc.). The schema split happened ~v2.22.x (2022). See `06-deep-dive-remaining-gaps.md`.
 
-- [ ] **The actual WazzapMigrator restore trick**: Their flow ends with "reinstall WhatsApp → it detects local backup → restore." What exact path and filename does WhatsApp for Android check? Is it `/sdcard/WhatsApp/Databases/msgstore.db.crypt15`? Can it be an unencrypted `msgstore.db`?
+- [x] **The WazzapMigrator restore trick**: Uses Path A — places converted backup in the Databases folder. WhatsApp detects it on fresh install. Must be encrypted (`.crypt15`). See `06-deep-dive-remaining-gaps.md`.
