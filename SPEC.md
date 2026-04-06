@@ -198,3 +198,276 @@ CASE WHEN ZISFROMME=1 THEN ZTOJID ELSE ZFROMJID END → key_remote_jid
 - iOS: `ZSORT` field (integer, gaps = deleted messages)
 - Android: `sort_id` field + `_id` autoincrement
 - The `sort` field is what WhatsApp uses for display order, NOT the timestamp. This is why naive timestamp-based ordering fails.
+
+---
+
+## 4. Candidate Approaches
+
+### Approach A: Backup Extraction + Database Conversion
+
+```
+iTunes backup → decrypt → extract ChatStorage.sqlite → parse
+→ convert schema (iOS→Android) → generate msgstore.db
+→ copy media files with path remapping
+→ encrypt as .crypt15 (or root-place unencrypted)
+→ WhatsApp restores on Android
+```
+
+**Pros:**
+- Complete data — gets everything in the backup, not limited by sync depth
+- Works offline — no WhatsApp account interaction needed during conversion
+- Proven pattern — every commercial tool uses this approach
+- User keeps control — data never leaves their machine
+
+**Cons:**
+- Schema-dependent — breaks when WhatsApp updates its database format
+- Requires iTunes backup — user must create one (or have one)
+- Encryption complexity — producing a valid `.crypt15` requires the encryption key (from root or wa-crypt-tools)
+- Media path remapping is tedious (different directory structures, naming conventions)
+
+**Restore options:**
+1. **Root path:** Place unencrypted `msgstore.db` directly in `/data/data/com.whatsapp/databases/`, fix ownership with `chown`. Simplest but requires root.
+2. **Encrypted backup path:** Re-encrypt `msgstore.db` → `msgstore.db.crypt15` using wa-crypt-tools, place in `Android/media/com.whatsapp/WhatsApp/Databases/`, reinstall WhatsApp, restore from local backup.
+3. **ADB sideload:** Push files via ADB without full root (may work on debug builds).
+
+### Approach B: WhatsApp Web Protocol (Baileys / whatsmeow)
+
+```
+User scans QR code → connect as WhatsApp Web client
+→ receive history sync (proto.IWebMessageInfo protobuf)
+→ request on-demand backfill for older messages
+→ store in neutral format
+→ convert to target platform schema
+→ restore to Android
+```
+
+**Pros:**
+- Platform-agnostic source — protobuf is neither iOS nor Android format
+- No backup extraction needed — works even if user no longer has iPhone
+- Clean data model — protobuf is the canonical WhatsApp message representation
+- Media download supported via protocol
+
+**Cons:**
+- **Best-effort history** — WhatsApp controls sync depth; no guarantee of completeness
+- Requires phone to be online during sync
+- Protocol changes — WhatsApp can break Baileys/whatsmeow at any time
+- Account risk — connecting unofficial clients may trigger WhatsApp security checks
+- On-demand backfill is per-chat, slow (recommended 50 messages/request)
+
+### Approach C: Hybrid
+
+```
+Approach A for bulk history from iTunes backup
++ Approach B to fill gaps, verify, handle edge cases
+→ merge into single Android database
+→ restore
+```
+
+**Pros:**
+- Most complete coverage
+- Fallback for each approach's weaknesses
+- Can cross-validate data between sources
+
+**Cons:**
+- Most complex to implement
+- Deduplication required (same message from two sources)
+- Two dependency surfaces (iTunes backup format + WhatsApp Web protocol)
+
+### Comparison Matrix
+
+| Factor | A: Backup Convert | B: Web Protocol | C: Hybrid |
+|--------|-------------------|-----------------|-----------|
+| Data completeness | High (full backup) | Variable (best-effort) | Highest |
+| Requires iPhone | Yes (for backup) | No (QR scan from any device) | Yes |
+| Requires root/key | For restore only | For restore only | For restore only |
+| Schema maintenance | High | Low (protobuf stable) | High |
+| Implementation complexity | Medium | Medium | High |
+| Account risk | None | Low-medium | Low-medium |
+| Offline capable | Yes | No | Partial |
+
+### Initial Leaning
+
+**Approach A first.** It's the proven path, gives complete data, and doesn't risk the user's WhatsApp account. The schema maintenance burden is real but manageable with version detection. Approach B is a compelling future addition — especially for users who no longer have their iPhone — but the best-effort nature of history sync makes it unreliable as the sole data source.
+
+**This leaning will be validated or revised by the experiments in Section 5.**
+
+---
+
+## 5. Experiments
+
+> Each experiment must be completed and documented before choosing a final direction.
+> Results will be recorded inline below.
+
+### Experiment 1: Parse a Real ChatStorage.sqlite
+
+**Hypothesis:** The iOS schema documented in our research (Section 3.1) accurately describes a current WhatsApp installation's database.
+
+**Setup:**
+- Obtain an unencrypted iTunes backup containing WhatsApp data (own device)
+- Use `iphone_backup_decrypt` library or manual extraction to get `ChatStorage.sqlite`
+- Alternatively: use the built-in manifest to locate the file by domain `AppDomainGroup-group.net.whatsapp.WhatsApp.shared`
+
+**Procedure:**
+1. Extract `ChatStorage.sqlite` from backup
+2. Run `.schema` in sqlite3 to dump full schema
+3. Compare table names, column names, and types against our documentation
+4. Query `SELECT DISTINCT ZMESSAGETYPE FROM ZWAMESSAGE` to verify message type codes
+5. Verify timestamp format: pick a known message, compute `ZMESSAGEDATE + 978307200`, confirm it matches the actual send time
+6. Check `ZSORT` ordering vs `ZMESSAGEDATE` ordering — are they always consistent?
+7. Inspect a `ZMEDIAKEY` blob — confirm protobuf structure with first 32 bytes as AES key
+
+**Success criteria:**
+- [ ] All documented tables exist
+- [ ] Column names and types match
+- [ ] Message type codes match documented values
+- [ ] Timestamp conversion formula produces correct dates
+- [ ] At least one media key blob parses as expected
+
+**Results:** _TBD_
+
+---
+
+### Experiment 2: Parse a Real msgstore.db
+
+**Hypothesis:** A current WhatsApp Android installation uses the modern normalized schema (singular `message` table + satellite tables).
+
+**Setup:**
+- Obtain a decrypted `msgstore.db` from an Android device (root extract or decrypt a `.crypt15` backup using wa-crypt-tools)
+
+**Procedure:**
+1. Run `.tables` and `.schema` in sqlite3
+2. Confirm `message` (not `messages`) table exists
+3. Confirm satellite tables: `message_media`, `message_location`, `message_quoted`, `message_add_on`, `jid`, `chat`
+4. Count total tables (expecting 100+)
+5. Query message types, verify codes against documentation
+6. Check for `message_add_on` entries (reactions, edits) if present
+7. Inspect `jid` table structure — confirm `user`, `server`, `type` columns
+8. Verify `sort_id` behavior vs `_id` vs `timestamp`
+
+**Success criteria:**
+- [ ] Modern normalized schema confirmed
+- [ ] Table count in expected range
+- [ ] Message type codes match documentation (especially audio=2, video=3)
+- [ ] `jid` normalization works as documented
+
+**Results:** _TBD_
+
+---
+
+### Experiment 3: Baileys History Sync
+
+**Hypothesis:** Connecting via Baileys and performing history sync + on-demand backfill retrieves a meaningful portion of chat history (at least several months).
+
+**Setup:**
+- Install Baileys: `npm install @whiskeysockets/baileys`
+- Write a minimal script that connects, listens for `messaging-history.set`, and logs message counts per chat
+- Keep phone online throughout
+
+**Procedure:**
+1. Connect via QR code scan
+2. Wait for initial history sync to complete (monitor `progress` and `isLatest` fields)
+3. Log: total chats received, total messages, oldest message timestamp per chat
+4. Attempt on-demand backfill for 3 chats (use `fetchMessageHistory` with count=50)
+5. Log: how many additional messages arrived, how far back they go
+6. Inspect one `proto.IWebMessageInfo` message — document the protobuf fields present
+7. Check if media URLs are included and whether they're downloadable
+
+**Success criteria:**
+- [ ] Successfully connects and receives history sync
+- [ ] Quantify: how many messages from initial sync vs on-demand
+- [ ] Oldest message date across all chats
+- [ ] At least one media message includes downloadable URL
+
+**Results:** _TBD_
+
+---
+
+### Experiment 4: Android Restore — Hand-Crafted msgstore.db
+
+**Hypothesis:** WhatsApp for Android will accept a hand-crafted `msgstore.db` placed in its data directory via root, and display the messages correctly.
+
+**Setup:**
+- Rooted Android device (or emulator with root)
+- Create a minimal `msgstore.db` with:
+  - 1 entry in `jid` table
+  - 1 entry in `chat` table
+  - 3 entries in `message` table (one text, one with media reference, one incoming)
+  - Correct FKs, timestamps, sort_ids
+
+**Procedure:**
+1. Uninstall WhatsApp, reinstall, open once to initialize, then force-stop
+2. Replace `/data/data/com.whatsapp/databases/msgstore.db` with hand-crafted version
+3. Fix ownership: `chown u0_aXXX:u0_aXXX msgstore.db`
+4. Open WhatsApp, verify phone number
+5. Check: Do the 3 messages appear? Correct order? Correct timestamps? Correct direction (sent/received)?
+6. If WhatsApp crashes or shows "corrupt database", inspect logcat for error details
+
+**Success criteria:**
+- [ ] WhatsApp opens without crashing
+- [ ] All 3 messages display correctly
+- [ ] Timestamps show correct dates
+- [ ] Message direction (sent vs received) is correct
+- [ ] Chat appears in chat list with correct contact name
+
+**Results:** _TBD_
+
+---
+
+### Experiment 5: wa-crypt-tools Re-Encryption
+
+**Hypothesis:** We can take a modified `msgstore.db`, encrypt it with wa-crypt-tools into a valid `.crypt15` file, and WhatsApp will restore from it on a non-rooted device.
+
+**Setup:**
+- `pip install wa-crypt-tools`
+- Obtain the encryption key file from a rooted device (`/data/data/com.whatsapp/files/key` or `encrypted_backup.key`)
+- Use the hand-crafted `msgstore.db` from Experiment 4
+
+**Procedure:**
+1. Encrypt: `wa-crypt-tools encrypt --key key_file msgstore.db msgstore.db.crypt15`
+2. Place `msgstore.db.crypt15` in `Android/media/com.whatsapp/WhatsApp/Databases/`
+3. Uninstall WhatsApp, reinstall
+4. On first launch, WhatsApp should detect local backup and offer restore
+5. Tap restore, verify messages appear
+
+**Success criteria:**
+- [ ] wa-crypt-tools produces a `.crypt15` file without errors
+- [ ] WhatsApp detects and offers to restore the backup
+- [ ] Messages appear correctly after restore
+- [ ] This works on a non-rooted device
+
+**Results:** _TBD_
+
+---
+
+### Experiment 6: End-to-End Smoke Test
+
+**Hypothesis:** A message extracted from a real iOS `ChatStorage.sqlite` can be converted to Android format and displayed correctly in WhatsApp on Android.
+
+**Setup:**
+- Real `ChatStorage.sqlite` from Experiment 1
+- Target Android device (rooted or with key for Experiment 5 path)
+- Conversion script implementing the paracycle gist mappings, updated for modern schema
+
+**Procedure:**
+1. Extract one chat (5-10 messages, mix of text and media) from iOS database
+2. Convert using updated schema mapping:
+   - Timestamp: `(ZMESSAGEDATE + 978307200) * 1000`
+   - Message types: swap video (2→3) and audio (3→2)
+   - Direction: `CASE WHEN ZISFROMME=1 THEN ZTOJID ELSE ZFROMJID END`
+   - Create `jid` entries for all JIDs
+   - Create `chat` entry
+   - Create `message_media` entries for media messages
+3. Insert into a fresh `msgstore.db` (cloned from a real one with messages cleared)
+4. Restore to Android (via root or re-encryption)
+5. Open WhatsApp, navigate to the chat
+6. Verify: message text, order, timestamps, direction, media thumbnails
+
+**Success criteria:**
+- [ ] All text messages display with correct content
+- [ ] Messages are in correct chronological order
+- [ ] Timestamps display correct dates
+- [ ] Sent vs received messages appear on correct side
+- [ ] Media messages show thumbnails (even if media files aren't transferred yet)
+- [ ] Chat appears with correct contact name in chat list
+
+**Results:** _TBD_
