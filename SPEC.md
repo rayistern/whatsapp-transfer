@@ -471,3 +471,335 @@ Approach A for bulk history from iTunes backup
 - [ ] Chat appears with correct contact name in chat list
 
 **Results:** _TBD_
+
+---
+
+## 6. Technical Design
+
+> **This section is a preliminary design assuming Approach A (Backup Conversion).**
+> It will be revised based on experiment results. If experiments reveal that
+> Approach B or C is superior, this section will be rewritten.
+
+### 6.1 Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    User's Computer                   │
+│                                                      │
+│  ┌──────────┐    ┌──────────┐    ┌───────────────┐  │
+│  │  iTunes   │───▶│ Extractor│───▶│ ChatStorage   │  │
+│  │  Backup   │    │          │    │ .sqlite       │  │
+│  └──────────┘    └──────────┘    └───────┬───────┘  │
+│                                          │           │
+│                                          ▼           │
+│                                  ┌───────────────┐   │
+│                                  │   Converter    │   │
+│                                  │               │   │
+│                                  │  iOS schema   │   │
+│                                  │     ──▶       │   │
+│                                  │  Android      │   │
+│                                  │  schema       │   │
+│                                  └───────┬───────┘   │
+│                                          │           │
+│                       ┌──────────────────┼────────┐  │
+│                       │                  │        │  │
+│                       ▼                  ▼        │  │
+│               ┌──────────────┐  ┌──────────────┐ │  │
+│               │  msgstore.db │  │ Media files  │ │  │
+│               │  (Android)   │  │ (remapped)   │ │  │
+│               └──────┬───────┘  └──────┬───────┘ │  │
+│                      │                 │         │  │
+│                      ▼                 │         │  │
+│               ┌──────────────┐         │         │  │
+│               │  Encryptor   │         │         │  │
+│               │  (optional)  │         │         │  │
+│               └──────┬───────┘         │         │  │
+│                      │                 │         │  │
+│                      ▼                 ▼         │  │
+│               ┌────────────────────────────────┐ │  │
+│               │  Output: WhatsApp/ directory   │ │  │
+│               │  ├── Databases/                │ │  │
+│               │  │   └── msgstore.db.crypt15   │ │  │
+│               │  └── Media/                    │ │  │
+│               │      ├── WhatsApp Images/      │ │  │
+│               │      ├── WhatsApp Video/       │ │  │
+│               │      └── WhatsApp Voice Notes/ │ │  │
+│               └────────────────────────────────┘ │  │
+│                                                  │  │
+└──────────────────────────────────────────────────────┘
+                         │
+                         ▼ (ADB push / manual copy / USB)
+                 ┌──────────────┐
+                 │   Android    │
+                 │   Device     │
+                 └──────────────┘
+```
+
+### 6.2 Component Breakdown
+
+**1. Extractor** — Reads iTunes backup, locates WhatsApp files
+- Input: iTunes backup directory (encrypted or unencrypted)
+- Uses `iphone_backup_decrypt` for encrypted backups
+- Extracts: `ChatStorage.sqlite`, all media files from `Message/Media/`
+- Output: raw iOS database + media directory
+
+**2. Converter** — Core schema transformation
+- Input: `ChatStorage.sqlite`
+- Creates: fresh `msgstore.db` with modern Android schema
+- Performs:
+  - JID normalization: extract all unique JIDs → populate `jid` table
+  - Chat creation: `ZWACHATSESSION` → `chat` table (linking to `jid` rows)
+  - Message conversion: `ZWAMESSAGE` → `message` table
+    - Timestamp: `(ZMESSAGEDATE + 978307200) * 1000`
+    - Message types: swap video (2↔3) and audio (3↔2)
+    - Direction: derive `key_remote_jid` from `ZISFROMME`/`ZFROMJID`/`ZTOJID`
+    - Sort order: map `ZSORT` → `sort_id` preserving relative ordering
+    - Status: outgoing→5 (delivered), incoming→0 (received), system→6
+  - Media: `ZWAMEDIAITEM` → `message_media` (with path remapping)
+  - Locations: `ZWAMEDIAITEM` lat/long → `message_location`
+  - Quotes: reply chain reconstruction → `message_quoted`
+  - Group members: `ZWAGROUPMEMBER` → `group_participants`
+- Output: populated `msgstore.db`
+
+**3. Media Remapper** — Reorganizes media files
+- Input: iOS media directory (flat-ish structure under `Message/Media/`)
+- Renames and restructures into Android convention:
+  - Images → `WhatsApp Images/` with `IMG-YYYYMMDD-WA####.jpg` naming
+  - Videos → `WhatsApp Video/`
+  - Voice notes → `WhatsApp Voice Notes/` (organized by date)
+  - Documents → `WhatsApp Documents/`
+- Updates `file_path` in `message_media` table to match new locations
+- Output: Android-structured media directory
+
+**4. Encryptor** (optional) — Wraps database for non-root restore
+- Input: `msgstore.db` + encryption key
+- Uses wa-crypt-tools to produce `msgstore.db.crypt15`
+- Output: encrypted backup file
+
+### 6.3 Schema Conversion — Key SQL (Modern Schema)
+
+This updates the paracycle gist for the modern normalized Android schema:
+
+```sql
+-- Step 1: Populate jid table from all unique JIDs in iOS data
+INSERT INTO jid (user, server, agent, device, type, raw_string)
+SELECT DISTINCT
+  SUBSTR(jid_str, 1, INSTR(jid_str, '@') - 1),
+  SUBSTR(jid_str, INSTR(jid_str, '@') + 1),
+  0, 0, 0,
+  jid_str
+FROM (
+  SELECT ZFROMJID AS jid_str FROM iphone.ZWAMESSAGE WHERE ZFROMJID IS NOT NULL
+  UNION
+  SELECT ZTOJID FROM iphone.ZWAMESSAGE WHERE ZTOJID IS NOT NULL
+  UNION
+  SELECT ZCONTACTJID FROM iphone.ZWACHATSESSION WHERE ZCONTACTJID IS NOT NULL
+  UNION
+  SELECT ZMEMBERJID FROM iphone.ZWAGROUPMEMBER WHERE ZMEMBERJID IS NOT NULL
+);
+
+-- Step 2: Populate chat table
+INSERT INTO chat (_id, jid_row_id, subject, created_timestamp, sort_timestamp)
+SELECT
+  cs.Z_PK,
+  j._id,
+  cs.ZPARTNERNAME,
+  CAST((978307200 + cs.ZLASTMESSAGEDATE) * 1000 AS INTEGER),
+  CAST((978307200 + cs.ZLASTMESSAGEDATE) * 1000 AS INTEGER)
+FROM iphone.ZWACHATSESSION cs
+JOIN jid j ON j.raw_string = cs.ZCONTACTJID;
+
+-- Step 3: Populate message table
+INSERT INTO message (
+  chat_row_id, from_me, key_id, sender_jid_row_id,
+  status, timestamp, received_timestamp, message_type,
+  text_data, starred, sort_id
+)
+SELECT
+  c._id,
+  m.ZISFROMME,
+  m.ZSTANZAID,
+  CASE WHEN m.ZISFROMME = 0 THEN sender_jid._id ELSE 0 END,
+  CASE
+    WHEN m.ZMESSAGETYPE = 6 THEN 6
+    WHEN m.ZISFROMME = 1 THEN 5
+    ELSE 0
+  END,
+  CAST((978307200 + m.ZMESSAGEDATE) * 1000 AS INTEGER),
+  CAST((978307200 + m.ZMESSAGEDATE) * 1000 AS INTEGER),
+  CASE m.ZMESSAGETYPE
+    WHEN 2 THEN 3  -- iOS video → Android video
+    WHEN 3 THEN 2  -- iOS audio → Android audio
+    WHEN 8 THEN 9  -- iOS document → Android document
+    WHEN 6 THEN 7  -- iOS system → Android system
+    ELSE m.ZMESSAGETYPE
+  END,
+  m.ZTEXT,
+  COALESCE(m.ZSTARRED, 0),
+  m.ZSORT
+FROM iphone.ZWAMESSAGE m
+JOIN chat c ON c._id = m.ZCHATSESSION
+LEFT JOIN jid sender_jid ON sender_jid.raw_string = m.ZFROMJID
+ORDER BY m.ZMESSAGEDATE ASC;
+
+-- Step 4: Populate message_media
+INSERT INTO message_media (
+  message_row_id, chat_row_id, file_path, file_size,
+  mime_type, media_key, width, height, media_duration
+)
+SELECT
+  msg._id,
+  msg.chat_row_id,
+  mi.ZMEDIALOCALPATH,  -- will be remapped by Media Remapper
+  mi.ZFILESIZE,
+  mi.ZVCARDSTRING,     -- MIME type (confusing iOS column name)
+  mi.ZMEDIAKEY,
+  CASE WHEN mi.ZLATITUDE > 90 THEN CAST(mi.ZLATITUDE AS INTEGER) ELSE NULL END,
+  CASE WHEN mi.ZLONGITUDE > 180 THEN CAST(mi.ZLONGITUDE AS INTEGER) ELSE NULL END,
+  mi.ZMOVIEDURATION
+FROM iphone.ZWAMEDIAITEM mi
+JOIN iphone.ZWAMESSAGE m ON mi.ZMESSAGE = m.Z_PK
+JOIN message msg ON msg.key_id = m.ZSTANZAID;
+```
+
+> **Note:** This SQL is illustrative. The actual implementation will be in Python
+> using sqlite3, with proper error handling, batch processing, and schema version
+> detection.
+
+### 6.4 Minimum Viable Tables
+
+For a working MVP, we need to populate these tables in `msgstore.db`:
+
+| Table | Required | Notes |
+|-------|----------|-------|
+| `jid` | Yes | All contact/group JIDs |
+| `chat` | Yes | Chat list entries |
+| `message` | Yes | All messages |
+| `message_media` | Yes | Media metadata (even without files, for placeholders) |
+| `message_location` | If locations exist | Location messages |
+| `message_quoted` | If replies exist | Reply chain preservation |
+| `message_system` | If group events | "X created group", "X added Y" |
+| `group_participants` | If groups exist | Group membership |
+| `message_thumbnail` | Nice-to-have | Inline thumbnails for media |
+| `message_vcard` | If contacts shared | Contact card messages |
+
+Tables we can safely leave empty initially: `message_add_on` (reactions), `call_log`, `labels`, `message_ephemeral`, payment tables, template tables, FTS indexes (WhatsApp rebuilds these).
+
+---
+
+## 7. Implementation Plan
+
+### Phase 1: Foundation & Extraction
+- Set up Python project with dependencies (`sqlite3`, `iphone_backup_decrypt`, `wa-crypt-tools`)
+- Implement iTunes backup locator and extractor
+- Parse `ChatStorage.sqlite` — enumerate chats, messages, media items
+- Output: structured Python objects representing iOS WhatsApp data
+- **Gate:** Experiment 1 passes
+
+### Phase 2: Schema Conversion (Text Only)
+- Create empty `msgstore.db` with modern Android schema (DDL from whatsapp-viewer)
+- Implement JID normalization
+- Implement message conversion (text messages only, no media)
+- Implement chat table population
+- Preserve sort order via `ZSORT` → `sort_id` mapping
+- **Gate:** Experiment 4 passes (hand-crafted db accepted by WhatsApp)
+
+### Phase 3: Media Handling
+- Implement media file remapping (iOS paths → Android directory structure)
+- Populate `message_media` table with updated paths
+- Handle media types: images, videos, voice notes, documents
+- EXIF date injection (best-effort, using iOS timestamps from database)
+- **Gate:** Media thumbnails appear in WhatsApp after restore
+
+### Phase 4: Advanced Message Types
+- Location messages → `message_location`
+- Quoted/reply messages → `message_quoted`
+- Contact cards → `message_vcard`
+- Group metadata → `group_participants`
+- System messages → `message_system`
+
+### Phase 5: Restore Mechanism
+- Root path: ADB push + ownership fix script
+- Encrypted path: wa-crypt-tools integration for `.crypt15` output
+- User-facing instructions/script for restore process
+- **Gate:** Experiment 5 and 6 pass
+
+### Phase 6: Polish & Edge Cases
+- Schema version detection (modern vs legacy Android WhatsApp)
+- Error handling and validation
+- Progress reporting
+- Selective chat transfer (not all-or-nothing)
+- Merge capability investigation (most ambitious — append to existing Android chats)
+
+### Suggested Tech Stack
+
+- **Language:** Python 3.10+
+- **Dependencies:**
+  - `sqlite3` (stdlib) — database operations
+  - `iphone_backup_decrypt` — iTunes backup extraction
+  - `wa-crypt-tools` — Android backup encryption/decryption
+  - `protobuf` — if we need to parse `ZMEDIAKEY` blobs or Baileys data
+- **Testing:** pytest with fixture databases
+- **Distribution:** pip-installable CLI tool
+
+---
+
+## 8. Known Risks & Open Questions
+
+### Technical Risks
+
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| WhatsApp schema changes | High | Schema version detection; community monitoring; adapter pattern |
+| Sort order fidelity | High | Experiments 4+6 will validate; may need WhatsApp-version-specific logic |
+| Media path mapping failures | Medium | Graceful fallback to placeholder thumbnails |
+| wa-crypt-tools encryption compatibility | Medium | Experiment 5 will validate |
+| Modern features lost (reactions, edits, polls) | Low (MVP) | Document as known limitation; add in Phase 6 |
+| Encrypted iTunes backup handling | Low | iphone_backup_decrypt handles this |
+
+### Legal Considerations
+
+- **WhatsApp ToS:** Our tool processes the user's own data locally. It does not modify WhatsApp, install custom APKs, or interact with WhatsApp's servers (unlike Mobitrix). This is the safest legal posture.
+- **DMCA:** Interoperability exemption (17 U.S.C. § 1201(f)) likely applies — we're enabling data portability between platforms. The wa-crypt-tools library is openly published and not challenged.
+- **GDPR:** All processing is local. No data leaves the user's machine. Minimal exposure.
+- **Practical precedent:** Meta has not pursued legal action against any of the existing transfer tools (Tenorshare, Wondershare, WazzapMigrator) despite years of open operation.
+
+### Open Questions
+
+1. **Can WhatsApp detect a "synthetic" database?** — Do recent versions validate database checksums, row counts, or schema hashes? Experiment 4 will answer this.
+2. **FTS index rebuilding** — Will WhatsApp rebuild its full-text search indexes automatically, or will search be broken until it does? Need to test.
+3. **Merge vs overwrite** — Is it possible to append converted messages to an existing Android WhatsApp database without breaking it? This is the holy grail feature but may require deep understanding of WhatsApp's internal consistency checks.
+4. **Multi-device impact** — If the user has WhatsApp Web sessions, does restoring a modified database cause sync conflicts?
+
+---
+
+## 9. References
+
+### Research Documents (in this repo)
+- `research/01-open-source-tools.md` — Open-source project catalog
+- `research/02-db-schemas.md` — iOS and Android schema documentation
+- `research/03-market-legal.md` — Market landscape and legal analysis
+- `research/04-known-issues.md` — Known bugs with all transfer methods
+- `research/05-alternative-approaches.md` — Baileys, Wondershare, iFunbox, architectural approaches
+- `research/06-deep-dive-remaining-gaps.md` — Android restore mechanism, paracycle gist, CDN expiry, modern message types
+
+### Key GitHub Repositories
+- [wa-crypt-tools](https://github.com/ElDavoo/wa-crypt-tools) — Decrypt/encrypt Android backups
+- [iphone_backup_decrypt](https://github.com/jsharkey13/iphone_backup_decrypt) — iOS backup extraction
+- [WhatsApp-Chat-Exporter](https://github.com/KnugiHK/WhatsApp-Chat-Exporter) — Cross-platform parser
+- [WhatsAppIphoneToAndroid](https://github.com/Kethen/WhatsAppIphoneToAndroid) — iOS→Android (archived, legacy schema)
+- [watoi](https://github.com/residentsummer/watoi) — Android→iOS
+- [Baileys](https://github.com/WhiskeySockets/Baileys) — WhatsApp Web protocol (TypeScript)
+- [whatsmeow](https://github.com/tulir/whatsmeow) — WhatsApp Web protocol (Go)
+- [wacli](https://github.com/steipete/wacli) — CLI built on whatsmeow
+- [whatsapp-history-exporter](https://github.com/ricardojlrufino/whatsapp-history-exporter) — Baileys-based exporter
+- [whatsapp-viewer](https://github.com/andreas-mausch/whatsapp-viewer) — Android db viewer (includes schema SQL)
+- [paracycle gist](https://gist.github.com/paracycle/6107205) — iOS→Android SQL conversion (legacy schema)
+
+### Technical References
+- [WhatsApp E2E Backup Whitepaper](https://www.whatsapp.com/security/WhatsApp_Security_Encrypted_Backups_Whitepaper.pdf) — Official encryption documentation
+- [Belkasoft iOS WhatsApp Forensics](https://belkasoft.com/ios-whatsapp-forensics-with-belkasoft-x)
+- [Belkasoft Android WhatsApp Forensics](https://belkasoft.com/android-whatsapp-forensics-analysis)
+- [The Binary Hick: New msgstore schema](https://thebinaryhick.blog/2022/06/09/new-msgstore-who-dis-a-look-at-an-updated-whatsapp-on-android/)
+- [Group-IB WhatsApp Forensics](https://www.group-ib.com/blog/whatsapp-forensic-artifacts/)
+- [Anglano (2014): Forensic Analysis of WhatsApp on Android](https://arxiv.org/abs/1507.07739)
