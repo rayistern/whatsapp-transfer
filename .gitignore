@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+dist/
+build/
+
+# Raw, private sample data — never commit
+experiments/_raw/
+*.crypt15
+*.sqlite-wal
+*.sqlite-shm
