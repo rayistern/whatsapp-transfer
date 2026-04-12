@@ -12,3 +12,11 @@ experiments/_raw/
 *.crypt15
 *.sqlite-wal
 *.sqlite-shm
+
+# Raw iTunes backups (multi-GB, contain personal data)
+test-data/82c517a9b512143c54fb883b2e2d2c2e5ca2fc3c/
+test-data/00008030-000E19322ED3402E/
+test-data/00008030-000E19322ED3402E-20260412-135418/
+
+# Extracted test data (contains real WhatsApp messages/media)
+test-data/extracted/
