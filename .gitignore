@@ -20,3 +20,6 @@ test-data/00008030-000E19322ED3402E-20260412-135418/
 
 # Extracted test data (contains real WhatsApp messages/media)
 test-data/extracted/
+
+# Babysitter orchestration
+.a5c/
