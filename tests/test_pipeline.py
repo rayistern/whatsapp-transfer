@@ -225,3 +225,54 @@ class TestRunCommand:
             ["run", "--ios", str(EXTRACTED_DIR), "--out", str(out)],
         )
         assert "copied" in result.output.lower()
+
+    def test_run_prints_summary_table(self, tmp_path: Path):
+        """The run command should print a summary table with message stats."""
+        out = tmp_path / "output"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["run", "--ios", str(EXTRACTED_DIR), "--out", str(out)],
+        )
+        assert result.exit_code == 0
+        assert "Conversion Summary" in result.output
+
+    def test_run_with_chats_filter(self, tmp_path: Path):
+        """wat run --ios ... --chats 1 should only convert chat pk=1."""
+        out = tmp_path / "output"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["run", "--ios", str(EXTRACTED_DIR), "--out", str(out), "--chats", "1"],
+        )
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+
+        db_path = out / "WhatsApp" / "Databases" / "msgstore.db"
+        conn = sqlite3.connect(str(db_path))
+        msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+        chat_count = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0]
+        conn.close()
+        assert chat_count == 1
+        assert msg_count == 4
+
+    def test_run_with_chats_filter_by_name(self, tmp_path: Path):
+        """wat run --ios ... --chats 'Rayi' should filter by chat name."""
+        out = tmp_path / "output"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["run", "--ios", str(EXTRACTED_DIR), "--out", str(out), "--chats", "Rayi"],
+        )
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        assert "Filtered" in result.output
+
+    def test_run_with_bad_chats_filter(self, tmp_path: Path):
+        """wat run --ios ... --chats 'NoSuchChat' should fail."""
+        out = tmp_path / "output"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["run", "--ios", str(EXTRACTED_DIR), "--out", str(out), "--chats", "NoSuchChat"],
+        )
+        assert result.exit_code == 1
+        assert "Error" in result.output

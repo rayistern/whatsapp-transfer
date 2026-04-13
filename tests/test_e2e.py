@@ -193,3 +193,185 @@ class TestCLI:
         )
         assert result.exit_code == 0
         assert out_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# Selective chat transfer (--chats)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectiveChatTransfer:
+    """Tests for --chats filtering on the convert command."""
+
+    def test_filter_by_pk(self, tmp_path: Path):
+        """--chats 1 should only convert chat pk=1 (4 messages)."""
+        out = tmp_path / "filtered.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(IOS_DB), "--out", str(out), "--chats", "1"],
+        )
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        conn = sqlite3.connect(str(out))
+        msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+        chat_count = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0]
+        conn.close()
+        assert chat_count == 1
+        assert msg_count == 4
+
+    def test_filter_by_name(self, tmp_path: Path):
+        """--chats 'Rayi' should match the private chat with partner_name='Rayi'."""
+        out = tmp_path / "filtered.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(IOS_DB), "--out", str(out), "--chats", "Rayi"],
+        )
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        conn = sqlite3.connect(str(out))
+        msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+        chat_count = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0]
+        conn.close()
+        assert chat_count == 1
+        assert msg_count == 4  # 4 messages in the Rayi chat
+
+    def test_filter_by_name_case_insensitive(self, tmp_path: Path):
+        """--chats 'rayi' (lowercase) should still match."""
+        out = tmp_path / "filtered.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(IOS_DB), "--out", str(out), "--chats", "rayi"],
+        )
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        conn = sqlite3.connect(str(out))
+        chat_count = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0]
+        conn.close()
+        assert chat_count == 1
+
+    def test_filter_by_name_substring(self, tmp_path: Path):
+        """--chats 'JLI' should match 'JLI Instructors' via substring."""
+        out = tmp_path / "filtered.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(IOS_DB), "--out", str(out), "--chats", "JLI"],
+        )
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        conn = sqlite3.connect(str(out))
+        msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+        chat_count = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0]
+        conn.close()
+        assert chat_count == 1
+        assert msg_count == 80  # 80 messages in JLI Instructors
+
+    def test_filter_multiple_pks(self, tmp_path: Path):
+        """--chats '1,3' should include both chats."""
+        out = tmp_path / "filtered.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(IOS_DB), "--out", str(out), "--chats", "1,3"],
+        )
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        conn = sqlite3.connect(str(out))
+        msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+        chat_count = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0]
+        conn.close()
+        assert chat_count == 2
+        assert msg_count == 5  # 4 + 1
+
+    def test_filter_fewer_messages_than_total(self, tmp_path: Path):
+        """Filtered output should have fewer messages than the full 85."""
+        out = tmp_path / "filtered.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(IOS_DB), "--out", str(out), "--chats", "1"],
+        )
+        assert result.exit_code == 0
+        conn = sqlite3.connect(str(out))
+        msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+        conn.close()
+        assert msg_count < 85
+
+    def test_no_chats_option_includes_all(self, tmp_path: Path):
+        """Without --chats, all 85 messages should be converted."""
+        out = tmp_path / "all.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(IOS_DB), "--out", str(out)],
+        )
+        assert result.exit_code == 0
+        conn = sqlite3.connect(str(out))
+        msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+        conn.close()
+        assert msg_count == 85
+
+    def test_filter_nonexistent_chat_name_fails(self, tmp_path: Path):
+        """--chats with a name that matches nothing should fail."""
+        out = tmp_path / "bad.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(IOS_DB), "--out", str(out), "--chats", "NoSuchChat"],
+        )
+        assert result.exit_code == 1
+        assert "Error" in result.output
+        assert "No chats matched" in result.output
+
+    def test_filter_nonexistent_pk_fails(self, tmp_path: Path):
+        """--chats with a PK that does not exist should fail."""
+        out = tmp_path / "bad.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(IOS_DB), "--out", str(out), "--chats", "999"],
+        )
+        assert result.exit_code == 1
+        assert "Error" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Error handling
+# ---------------------------------------------------------------------------
+
+
+class TestErrorHandling:
+    """Tests for error output on bad inputs."""
+
+    def test_convert_nonexistent_ios_db(self, tmp_path: Path):
+        """Passing a non-existent file to --ios should fail with exit code != 0."""
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(tmp_path / "nope.sqlite"), "--out", str(tmp_path / "out.db")],
+        )
+        # Typer's exists=True check will catch this before our code
+        assert result.exit_code != 0
+
+    def test_convert_invalid_sqlite(self, tmp_path: Path):
+        """Passing a non-SQLite file should produce a database error."""
+        bad_db = tmp_path / "bad.sqlite"
+        bad_db.write_text("this is not a database")
+        out = tmp_path / "out.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(bad_db), "--out", str(out)],
+        )
+        assert result.exit_code == 1
+        assert "Error" in result.output
+
+    def test_convert_summary_table_printed(self, tmp_path: Path):
+        """The convert command should print a summary table."""
+        out = tmp_path / "out.db"
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["convert", "--ios", str(IOS_DB), "--out", str(out)],
+        )
+        assert result.exit_code == 0
+        assert "Conversion Summary" in result.output
+        assert "text" in result.output.lower()
