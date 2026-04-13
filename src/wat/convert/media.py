@@ -15,6 +15,11 @@ from __future__ import annotations
 
 import os
 from datetime import date
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from wat.model import Message
 
 # Extension mapping for common MIME types when the original extension is missing
 _MIME_TO_EXT: dict[str, str] = {
@@ -131,6 +136,61 @@ def _ext_for(ios_path: str, mime_type: str) -> str:
         return ext_raw.lower()
     # Fall back to MIME -> extension lookup
     return _MIME_TO_EXT.get(mime_type, "")
+
+
+def copy_media_files(
+    ios_media_dir: Path,
+    android_media_dir: Path,
+    remapper: MediaRemapper,
+    messages: list["Message"],
+) -> dict:
+    """Copy iOS media files to Android directory structure.
+
+    Parameters
+    ----------
+    ios_media_dir:
+        The iOS extracted directory containing Message/Media/... (i.e. the parent
+        of ``Message/``).  Source paths are resolved as ``ios_media_dir / local_path``.
+    android_media_dir:
+        Target root for the Android ``WhatsApp/Media/`` tree.
+    remapper:
+        A :class:`MediaRemapper` instance (should be the *same* one used during
+        ``convert_corpus`` so paths match the DB).
+    messages:
+        List of :class:`Message` objects from the parsed corpus.
+
+    Returns
+    -------
+    dict
+        ``{copied: int, skipped: int, missing: int}``
+    """
+    import shutil
+
+    copied = 0
+    skipped = 0
+    missing = 0
+
+    for msg in messages:
+        if msg.media is None or msg.media.local_path is None:
+            continue
+
+        android_path = remapper.remap(msg.media.local_path, msg.media.mime_type)
+        if android_path is None:
+            skipped += 1
+            continue
+
+        src = ios_media_dir / msg.media.local_path
+        dest = android_media_dir / android_path
+
+        if not src.exists():
+            missing += 1
+            continue
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(dest))
+        copied += 1
+
+    return {"copied": copied, "skipped": skipped, "missing": missing}
 
 
 def remap_media_path(ios_path: str | None, mime_type: str | None) -> str | None:
