@@ -31,6 +31,8 @@ IOS_TO_ANDROID_MESSAGE_TYPE: dict[int, int] = {
     6: 7,   # system -> Android system (message_system table)
     7: 0,   # url (rendered as text on Android)
     8: 9,   # document
+    10: 0,  # missed call / group event -> text (rare, best-effort)
+    14: 15, # deleted/revoked message -> Android deleted
 }
 
 
