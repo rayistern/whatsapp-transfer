@@ -33,13 +33,20 @@
   backup directories, only one has usable WhatsApp data.
 - **Docs** — `docs/ACQUIRING_SAMPLE_DATA.md`, `docs/RESTORE.md`.
 
-### What does NOT exist yet
+### What has been built
 
-- No Android `msgstore.db` sample — plan is to use open-source DDL
-  (whatsapp-viewer project) for schema, then validate when we actually restore.
-- No implementation code beyond stubs.
-- No tests.
-- No babysitter run has been started.
+- Full working pipeline: extract, parse, convert, media copy, encrypt.
+- 150 tests across 7 test files, all passing.
+- CLI with `extract`, `convert`, `encrypt`, and `run` subcommands.
+- Android schema DDL (modern 2022+ normalized) in `convert/android_schema.py`.
+
+### What remains
+
+- **Device testing**: Output has not yet been validated on a real Android device.
+- **Merge capability**: Cannot merge into an existing Android backup with
+  messages. Creates a fresh `msgstore.db` only.
+- **vCard population**: `message_vcard` table is created but not written to.
+- **Reactions/edits/polls**: Newer Android schema features not yet mapped.
 
 ### Test data portability
 
@@ -63,61 +70,74 @@ The tool takes an iTunes backup (or already-extracted `ChatStorage.sqlite`) and
 produces a `msgstore.db` (and optionally `msgstore.db.crypt15`) that WhatsApp
 for Android will accept.
 
-### Phase 1: Foundation & Extraction
+### Phase 1: Foundation & Extraction -- COMPLETE
 
-- Implement iTunes backup locator and file extraction using `iphone_backup_decrypt`.
-- Parse `ChatStorage.sqlite` — populate the `Corpus` domain model.
-- Handle both encrypted and unencrypted iTunes backups.
-- **Test gate:** Parse the real `ChatStorage.sqlite` from `test-data/extracted/`,
-  verify all 85 messages, 3 chats, 76 media items are read correctly.
-- **Validates SPEC Experiment 1.**
+- [x] Implemented iOS `ChatStorage.sqlite` parser (`wat.extract`).
+- [x] Populated the `Corpus` domain model from `ZWAMESSAGE`, `ZWAMEDIAITEM`,
+  `ZWACHATSESSION`, `ZWAGROUPMEMBER`, `ZWAPROFILEPUSHNAME`.
+- [x] 25 tests validating 85 messages, 3 chats, 76 media items, 460 group members.
 
-### Phase 2: Schema Conversion (Text Only)
+### Phase 2: Schema Conversion (Text Only) -- COMPLETE
 
-- Obtain Android `msgstore.db` DDL from whatsapp-viewer or similar open-source
-  project. Create an empty database with the modern normalized schema.
-- Implement JID normalization (inline JIDs to `jid` table).
-- Implement message conversion (text messages only):
-  - Timestamp: `(ZMESSAGEDATE + 978307200) * 1000`
-  - Message types: swap video (2<->3) and audio (3<->2)
-  - Direction: derive `key_remote_jid` from `ZISFROMME`/`ZFROMJID`/`ZTOJID`
-  - Sort order: map `ZSORT` to `sort_id`
-  - Status codes: outgoing->5, incoming->0, system->6
-- Populate `chat` table from `ZWACHATSESSION`.
-- **Test gate:** Generated `msgstore.db` opens in sqlite3, has correct row
-  counts, text messages have correct timestamps and content.
+- [x] Created Android `msgstore.db` DDL (modern 2022+ normalized schema).
+- [x] Implemented JID normalization and deduplication via `_JidCache`.
+- [x] Implemented timestamp, type, status, and sort_id mapping.
+- [x] 38 tests covering schema, JID dedup, full conversion, timestamps, types.
 
-### Phase 3: Media Handling
+### Phase 3: Media Handling -- COMPLETE
 
-- Implement media file remapping (iOS `Message/Media/` paths to Android
-  `WhatsApp Images/`, `WhatsApp Video/`, etc.).
-- Populate `message_media` table with updated paths, MIME types, dimensions.
-- Handle media types: images, videos, voice notes, documents.
-- **Test gate:** Media entries in `message_media` reference valid remapped paths.
+- [x] Implemented `MediaRemapper` with per-date sequence counters.
+- [x] Populated `message_media` table with remapped paths and MIME types.
+- [x] Handled images, videos, audio, voice notes, and documents.
+- [x] 22 tests covering all media types and edge cases.
 
-### Phase 4: Advanced Message Types
+### Phase 4: Advanced Message Types -- COMPLETE
 
-- Location messages -> `message_location`
-- Quoted/reply messages -> `message_quoted`
-- Contact cards -> `message_vcard`
-- Group metadata -> `group_participants`
-- System messages -> `message_system`
-- **Test gate:** All 85 messages from test data convert without errors.
+- [x] Location messages -> `message_location` satellite table.
+- [x] Quoted/reply messages -> `message_quoted` with text resolution.
+- [x] Group metadata -> `group_participants` with JID references.
+- [x] System messages -> `message_system` satellite table.
+- [x] All 85 test messages convert without errors.
 
-### Phase 5: Restore Mechanism
+### Phase 5: Restore Mechanism -- COMPLETE
 
-- Root path: ADB push script + ownership fix.
-- Encrypted path: wa-crypt-tools integration for `.crypt15` output.
-- User-facing instructions for restore process.
-- **Validates SPEC Experiments 4, 5.**
+- [x] Documented rooted ADB push procedure in `docs/RESTORE.md`.
+- [x] Documented encrypted backup restore procedure.
+- [x] Added troubleshooting guide.
 
-### Phase 6: End-to-End Validation & Polish
+### Phase 6: Selective Chat Transfer -- COMPLETE
 
-- Schema version detection (modern vs legacy Android WhatsApp).
-- Error handling, progress reporting (Rich console output).
-- Selective chat transfer option.
-- **Validates SPEC Experiment 6:** Take real iOS messages, convert, restore on
-  Android, verify display.
+- [x] `--chats` flag on `convert` and `run` commands.
+- [x] Supports filtering by PK (integer) or name (case-insensitive substring).
+- [x] 10 tests covering PK, name, multi-select, error cases.
+
+### Phase 7: Encryption -- COMPLETE
+
+- [x] Integrated `wa-crypt-tools` (`Key15` + `Database15`) for crypt15 output.
+- [x] `encrypt` CLI command and `encrypt_db` function.
+- [x] 5 tests including round-trip encrypt/decrypt verification.
+
+### Phase 8: iTunes Backup Extraction -- COMPLETE
+
+- [x] Unencrypted extraction via `Manifest.db` parsing and SHA-1 file ID resolution.
+- [x] Encrypted extraction via `iphone_backup_decrypt`.
+- [x] Unified `extract_backup` entry point with auto-detection.
+- [x] 14 tests with synthetic iTunes backup fixtures.
+
+### Phase 9: Media Copy -- COMPLETE
+
+- [x] `copy_media_files` copies iOS media to Android directory structure.
+- [x] Uses same `MediaRemapper` as DB conversion for path consistency.
+- [x] Tracks copied/skipped/missing counts.
+- [x] 5 tests validating file copy behavior.
+
+### Phase 10: Full Pipeline -- COMPLETE
+
+- [x] `run` command chains extract, parse, convert, media copy, and encrypt.
+- [x] Supports `--ios` (pre-extracted) and `--backup` (raw iTunes backup).
+- [x] Rich summary table with message type breakdown and media stats.
+- [x] Error handling and progress reporting throughout.
+- [x] 18 tests covering the full pipeline.
 
 ---
 
@@ -158,13 +178,12 @@ The babysitter plugin has several relevant specialization process files:
   yet). Will validate against real device during restore phase.
 - **Test data:** Real iOS ChatStorage.sqlite with 85 messages across 3 chats.
 
-### Key decisions still open
+### Key decisions resolved
 
-- Exact Android DDL source (whatsapp-viewer repo vs reconstructing from SPEC).
-- Whether to support legacy Android schema (pre-2022 `messages` table) or
-  modern only.
-- Merge capability (append to existing Android chats) — ambitious, defer to
-  Phase 6+.
+- **Android DDL source**: Reconstructed from SPEC and open-source references,
+  stored in `src/wat/convert/android_schema.py`.
+- **Schema target**: Modern only (2022+ normalized). Legacy schema not supported.
+- **Merge capability**: Deferred. Not implemented; tool creates a fresh DB.
 
 ---
 
