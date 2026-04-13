@@ -19,6 +19,9 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from wat.extract import parse_ios_db
+from wat.convert.writer import convert_corpus
+
 app = typer.Typer(
     add_completion=False,
     help="Convert an iTunes WhatsApp backup into an Android msgstore.db.crypt15.",
@@ -41,7 +44,13 @@ def convert(
     out: Path = typer.Option(..., dir_okay=False, help="Output msgstore.db to create."),
 ) -> None:
     """Phase 3+: convert iOS ChatStorage.sqlite into an Android msgstore.db."""
-    raise typer.Exit(code=_not_implemented("convert"))
+    corpus = parse_ios_db(ios)
+    convert_corpus(corpus, out)
+    console.print(
+        f"[green]Converted {len(corpus.messages)} messages, "
+        f"{len(corpus.chats)} chats[/green]"
+    )
+    console.print(f"Output: {out}")
 
 
 @app.command()
