@@ -12,6 +12,7 @@ from wat.convert.mappings import (
     android_status,
     ios_ts_to_android_ms,
 )
+from wat.convert.media import MediaRemapper
 
 
 def _split_jid(raw: str) -> tuple[str, str]:
@@ -77,8 +78,10 @@ def _insert_messages(
     chat_pk_map: dict[int, int],
     chat_is_group: dict[int, bool],
     jid_cache: _JidCache,
+    media_remapper: MediaRemapper | None = None,
 ) -> None:
     """Insert messages and their satellite rows (media, location, quoted)."""
+    remapper = media_remapper or MediaRemapper()
     for msg in messages:
         chat_row_id = chat_pk_map.get(msg.chat_pk, 0)
         android_type = IOS_TO_ANDROID_MESSAGE_TYPE.get(msg.ios_type, 0)
@@ -113,6 +116,9 @@ def _insert_messages(
 
         # Satellite tables
         if msg.media is not None:
+            android_path = remapper.remap(
+                msg.media.local_path, msg.media.mime_type
+            )
             conn.execute(
                 """INSERT INTO message_media
                    (message_row_id, file_path, mime_type, file_size,
@@ -120,7 +126,7 @@ def _insert_messages(
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     msg_row_id,
-                    msg.media.local_path,
+                    android_path,
                     msg.media.mime_type,
                     msg.media.file_size,
                     msg.media.width,
