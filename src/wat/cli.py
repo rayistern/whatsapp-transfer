@@ -19,7 +19,10 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from typing import Optional
+
 from wat.extract import parse_ios_db
+from wat.extract.backup import extract_backup
 from wat.convert.writer import convert_corpus
 from wat.encrypt import encrypt_db
 
@@ -34,9 +37,21 @@ console = Console()
 def extract(
     backup: Path = typer.Option(..., exists=True, file_okay=False, help="iTunes backup directory."),
     out: Path = typer.Option(..., file_okay=False, help="Output directory for extracted files."),
+    password: Optional[str] = typer.Option(None, help="Backup encryption passphrase (if encrypted)."),
 ) -> None:
     """Phase 1: pull ChatStorage.sqlite and Message/Media/* from an iTunes backup."""
-    raise typer.Exit(code=_not_implemented("extract"))
+    try:
+        stats = extract_backup(backup, out, password=password)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[green]Extracted {stats['files_extracted']} files[/green]")
+    if stats["chat_storage_found"]:
+        console.print("[green]ChatStorage.sqlite found[/green]")
+    else:
+        console.print("[yellow]Warning: ChatStorage.sqlite not found in backup[/yellow]")
+    console.print(f"Output: {out}")
 
 
 @app.command()

@@ -165,10 +165,11 @@ class TestCLI:
         conn.close()
         assert count == 85
 
-    def test_extract_not_implemented(self):
+    def test_extract_invalid_backup(self):
         runner = CliRunner()
         result = runner.invoke(app, ["extract", "--backup", "/tmp", "--out", "/tmp/out"])
-        assert result.exit_code == 2
+        assert result.exit_code == 1
+        assert "not a valid iTunes backup" in result.output.lower() or "Error" in result.output
 
     def test_encrypt_command_succeeds(self, tmp_path: Path):
         """Encrypt command produces a crypt15 file from a valid DB and key."""
