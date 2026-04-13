@@ -170,16 +170,25 @@ class TestCLI:
         result = runner.invoke(app, ["extract", "--backup", "/tmp", "--out", "/tmp/out"])
         assert result.exit_code == 2
 
-    def test_encrypt_not_implemented(self, tmp_path: Path):
-        """Encrypt should still be a stub."""
-        # Create dummy files for the exists=True options
-        db_file = tmp_path / "dummy.db"
-        key_file = tmp_path / "dummy.key"
-        db_file.touch()
-        key_file.touch()
+    def test_encrypt_command_succeeds(self, tmp_path: Path):
+        """Encrypt command produces a crypt15 file from a valid DB and key."""
+        import os
+        import sqlite3
+
+        db_file = tmp_path / "msgstore.db"
+        key_file = tmp_path / "backup.key"
+        out_file = tmp_path / "msgstore.db.crypt15"
+
+        conn = sqlite3.connect(str(db_file))
+        conn.execute("CREATE TABLE t (id INTEGER)")
+        conn.commit()
+        conn.close()
+        key_file.write_bytes(os.urandom(32))
+
         runner = CliRunner()
         result = runner.invoke(
             app,
-            ["encrypt", "--db", str(db_file), "--key", str(key_file), "--out", str(tmp_path / "out.crypt15")],
+            ["encrypt", "--db", str(db_file), "--key", str(key_file), "--out", str(out_file)],
         )
-        assert result.exit_code == 2
+        assert result.exit_code == 0
+        assert out_file.exists()

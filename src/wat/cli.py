@@ -21,6 +21,7 @@ from rich.console import Console
 
 from wat.extract import parse_ios_db
 from wat.convert.writer import convert_corpus
+from wat.encrypt import encrypt_db
 
 app = typer.Typer(
     add_completion=False,
@@ -60,7 +61,8 @@ def encrypt(
     out: Path = typer.Option(..., dir_okay=False, help="Output msgstore.db.crypt15."),
 ) -> None:
     """Phase 7: wrap msgstore.db as a .crypt15 using wa-crypt-tools."""
-    raise typer.Exit(code=_not_implemented("encrypt"))
+    encrypt_db(db, key, out)
+    console.print(f"[green]Encrypted[/green] {db} -> {out}")
 
 
 @app.command()
