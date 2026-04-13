@@ -81,6 +81,12 @@ def _insert_messages(
     media_remapper: MediaRemapper | None = None,
 ) -> None:
     """Insert messages and their satellite rows (media, location, quoted)."""
+    # Build a lookup from stanza_id -> text for quoted message resolution
+    stanza_text_map: dict[str, str | None] = {}
+    for m in messages:
+        if m.stanza_id:
+            stanza_text_map[m.stanza_id] = m.text
+
     remapper = media_remapper or MediaRemapper()
     for msg in messages:
         chat_row_id = chat_pk_map.get(msg.chat_pk, 0)
@@ -146,10 +152,11 @@ def _insert_messages(
 
         # Quoted message reference
         if msg.quoted_stanza_id is not None:
+            quoted_text = stanza_text_map.get(msg.quoted_stanza_id)
             conn.execute(
-                """INSERT INTO message_quoted (message_row_id, key_id)
-                   VALUES (?, ?)""",
-                (msg_row_id, msg.quoted_stanza_id),
+                """INSERT INTO message_quoted (message_row_id, key_id, text_data)
+                   VALUES (?, ?, ?)""",
+                (msg_row_id, msg.quoted_stanza_id, quoted_text),
             )
 
         # System message

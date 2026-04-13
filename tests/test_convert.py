@@ -29,6 +29,13 @@ EXPECTED_TABLES = {
     "message_vcard",
     "message_system",
     "group_participants",
+    "message_add_on",
+    "message_forwarded",
+    "receipt_device",
+    "receipt_user",
+    "props",
+    "message_thumbnail",
+    "audio_data",
 }
 
 
@@ -57,6 +64,52 @@ class TestSchema:
                 "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'"
             ).fetchall()
             assert len(rows) >= 5
+        finally:
+            conn.close()
+
+    def test_wal_mode(self, tmp_path: Path):
+        db_path = tmp_path / "wal_test.db"
+        conn = create_android_db(db_path)
+        try:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            assert mode == "wal"
+        finally:
+            conn.close()
+
+    def test_page_size(self, tmp_path: Path):
+        db_path = tmp_path / "page_test.db"
+        conn = create_android_db(db_path)
+        try:
+            size = conn.execute("PRAGMA page_size").fetchone()[0]
+            assert size == 4096
+        finally:
+            conn.close()
+
+    def test_additional_tables_exist(self, tmp_path: Path):
+        db_path = tmp_path / "extra_tables.db"
+        conn = create_android_db(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            tables = {r[0] for r in rows}
+            additional = {
+                "message_add_on", "message_forwarded", "receipt_device",
+                "receipt_user", "props", "message_thumbnail", "audio_data",
+            }
+            assert additional.issubset(tables), f"Missing: {additional - tables}"
+        finally:
+            conn.close()
+
+    def test_props_has_schema_version(self, tmp_path: Path):
+        db_path = tmp_path / "props_test.db"
+        conn = create_android_db(db_path)
+        try:
+            row = conn.execute(
+                "SELECT value FROM props WHERE key = 'schema_version'"
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "1"
         finally:
             conn.close()
 
