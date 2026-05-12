@@ -24,19 +24,42 @@ def _split_jid(raw: str) -> tuple[str, str]:
 
 
 class _JidCache:
-    """Deduplicates JIDs and caches their row ids from the jid table."""
+    """Deduplicates JIDs and caches their row IDs from the Android ``jid`` table.
+
+    Many messages and chats reference the same JID (e.g. every message in a
+    1:1 chat shares the partner JID). Without deduplication we'd attempt
+    thousands of redundant INSERT + SELECT round-trips. This cache ensures
+    each unique JID string is inserted and looked up exactly once.
+
+    Strategy:
+    - On first encounter of a raw JID, split it into (user, server) and
+      INSERT OR IGNORE into the jid table. The OR IGNORE handles the
+      UNIQUE(user, server) constraint so we don't need to pre-check.
+    - Immediately SELECT back the _id (which may have been auto-assigned
+      on this insert, or may already exist from a prior run).
+    - Cache the raw_jid -> _id mapping in a Python dict for O(1) lookups
+      on subsequent hits.
+    """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
         self._cache: dict[str, int] = {}  # raw jid -> row_id
 
     def get_or_insert(self, raw_jid: str) -> int:
-        """Return the jid._id for *raw_jid*, inserting if needed."""
+        """Return the jid._id for *raw_jid*, inserting if needed.
+
+        Returns 0 for empty/None JIDs (Android convention: row_id 0
+        means "no JID" / "self").
+        """
         if not raw_jid:
             return 0
         if raw_jid in self._cache:
             return self._cache[raw_jid]
         user, server = _split_jid(raw_jid)
+        # INSERT OR IGNORE: the jid table has a UNIQUE(user, server) constraint.
+        # Using OR IGNORE avoids raising on duplicates while remaining idempotent.
+        # This is preferred over INSERT-or-SELECT-first because it's a single
+        # statement and handles concurrent/re-run scenarios cleanly.
         self._conn.execute(
             "INSERT OR IGNORE INTO jid (user, server) VALUES (?, ?)",
             (user, server),
@@ -55,7 +78,19 @@ def _insert_chats(
     chats: list[Chat],
     jid_cache: _JidCache,
 ) -> dict[int, int]:
-    """Insert chats and return a mapping of ios chat pk -> android chat _id."""
+    """Insert chats into Android ``chat`` table, returning iOS pk -> Android _id map.
+
+    JID normalization: each chat's partner_jid is split into (user, server)
+    and upserted via _JidCache. The resulting jid row_id is stored as
+    chat.jid_row_id, which is the Android schema's canonical way to
+    reference a conversation partner. This normalisation means the same
+    phone number appearing in multiple contexts (1:1 chat, group member)
+    always resolves to a single jid row.
+
+    For group chats, the subject (group name) is stored in chat.subject.
+    For 1:1 chats, subject is NULL — Android infers the display name from
+    the contacts database or push_name at render time.
+    """
     pk_map: dict[int, int] = {}
     for chat in chats:
         jid_row_id = jid_cache.get_or_insert(chat.partner_jid)
@@ -80,7 +115,22 @@ def _insert_messages(
     jid_cache: _JidCache,
     media_remapper: MediaRemapper | None = None,
 ) -> None:
-    """Insert messages and their satellite rows (media, location, quoted)."""
+    """Insert messages and their satellite rows (media, location, quoted).
+
+    Direction logic (from_me / sender_jid_row_id):
+    - from_me maps directly: 1 = sent by device owner, 0 = received.
+    - sender_jid_row_id differs between 1:1 and group chats:
+      * 1:1 chats: always 0, because Android infers the sender from the
+        chat's jid_row_id + from_me flag.
+      * Group chats (incoming only): set to the jid row_id of the actual
+        sender (from_jid). This is how Android knows which group member
+        sent each message. For outgoing group messages, it stays 0 (self).
+
+    sort_id comes from iOS ZSORT column: a monotonically increasing integer
+    that preserves message ordering even when timestamps collide (e.g.
+    rapid-fire messages within the same second). Android uses sort_id for
+    display ordering when timestamps are identical.
+    """
     # Build a lookup from stanza_id -> text for quoted message resolution
     stanza_text_map: dict[str, str | None] = {}
     for m in messages:
@@ -174,6 +224,19 @@ def _insert_group_participants(
     chat_pk_map: dict[int, int],
     jid_cache: _JidCache,
 ) -> None:
+    """Populate the ``group_participants`` table linking group JIDs to member JIDs.
+
+    The Android schema models group membership as:
+      group_participants.gjid_row_id  -> jid._id (the group's JID, e.g. 123456@g.us)
+      group_participants.jid_row_id   -> jid._id (the member's JID, e.g. 1415555@s.whatsapp.net)
+
+    The linkage requires two lookups per member:
+    1. Map iOS chat_pk -> Android chat._id via chat_pk_map.
+    2. From chat._id, look up chat.jid_row_id to get the group's JID row.
+       (We can't use chat._id directly because gjid_row_id references the
+       jid table, not the chat table.)
+    3. Insert the member's JID via _JidCache to get their jid row_id.
+    """
     for gm in group_members:
         gjid_row_id = chat_pk_map.get(gm.chat_pk, 0)
         # In the Android schema, gjid_row_id refers to the jid row of the group,

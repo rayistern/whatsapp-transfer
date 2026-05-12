@@ -18,6 +18,13 @@ def _parse_jid(raw: str) -> Jid:
 
 
 def _fetch_chats(conn: sqlite3.Connection) -> list[Chat]:
+    """Fetch all chat sessions from ZWACHATSESSION.
+
+    Each row represents a 1:1 or group conversation. Group detection uses
+    ZGROUPINFO: if this FK column is not NULL, the chat is a group. This is
+    more reliable than checking the JID suffix (@g.us) because some edge
+    cases (broadcast lists, status) have non-obvious JID formats.
+    """
     rows = conn.execute(
         """
         SELECT Z_PK, ZCONTACTJID, ZPARTNERNAME, ZGROUPINFO, ZLASTMESSAGEDATE
@@ -38,6 +45,24 @@ def _fetch_chats(conn: sqlite3.Connection) -> list[Chat]:
 
 
 def _fetch_media(conn: sqlite3.Connection) -> dict[int, Media]:
+    """Fetch all media items from ZWAMEDIAITEM, keyed by Z_PK.
+
+    The returned dict is keyed by ZWAMEDIAITEM.Z_PK (not ZWAMESSAGE.Z_PK).
+    Messages link to their media via ZWAMESSAGE.ZMEDIAITEM, which is a FK
+    pointing to ZWAMEDIAITEM.Z_PK. This indirection (FK, not same-PK) is
+    important: a message's Z_PK != its media item's Z_PK. The join happens
+    in _fetch_messages() via media_map[row[11]] where row[11] is ZMEDIAITEM.
+
+    Column notes:
+    - ZVCARDSTRING: despite the name, this stores the MIME type (e.g.
+      "image/jpeg"). Apple apparently reused a vCard-related column name
+      when adding media support. Confirmed in research/02-db-schemas.md.
+    - ZLATITUDE / ZLONGITUDE: overloaded depending on message type. For
+      location messages (type 5), these are actual GPS coordinates. For
+      image messages, they may store pixel dimensions (width/height) in
+      some iOS versions. We store them as-is and let the converter
+      interpret them based on the message's ios_type.
+    """
     rows = conn.execute(
         """
         SELECT Z_PK, ZMEDIALOCALPATH, ZVCARDSTRING, ZMEDIAKEY,
@@ -65,6 +90,14 @@ def _fetch_media(conn: sqlite3.Connection) -> dict[int, Media]:
 def _fetch_messages(
     conn: sqlite3.Connection, media_map: dict[int, Media]
 ) -> list[Message]:
+    """Fetch all messages from ZWAMESSAGE, attaching media via FK lookup.
+
+    Media attachment: ZWAMESSAGE.ZMEDIAITEM is a foreign key to
+    ZWAMEDIAITEM.Z_PK. We look up each message's media via
+    media_map.get(ZMEDIAITEM). This FK-based join (rather than
+    matching on message PK) is necessary because the two tables have
+    independent PK sequences.
+    """
     rows = conn.execute(
         """
         SELECT Z_PK, ZCHATSESSION, ZSTANZAID, ZISFROMME, ZMESSAGETYPE,
@@ -94,6 +127,12 @@ def _fetch_messages(
 
 
 def _fetch_group_members(conn: sqlite3.Connection) -> list[GroupMember]:
+    """Fetch all group members from ZWAGROUPMEMBER.
+
+    Each row links a group chat (via ZCHATSESSION FK) to a member JID.
+    ZCONTACTNAME provides the display name if the member is in the
+    device owner's address book; it may be NULL otherwise.
+    """
     rows = conn.execute(
         """
         SELECT ZCHATSESSION, ZMEMBERJID, ZCONTACTNAME
@@ -112,6 +151,13 @@ def _fetch_group_members(conn: sqlite3.Connection) -> list[GroupMember]:
 
 
 def _fetch_push_names(conn: sqlite3.Connection) -> dict[str, str]:
+    """Fetch push names from ZWAPROFILEPUSHNAME.
+
+    Push names are the display names that WhatsApp users choose for
+    themselves (visible to contacts). These serve as fallback display
+    names when the contact is not in the address book. Stored as a
+    simple jid -> name mapping.
+    """
     rows = conn.execute(
         "SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME"
     ).fetchall()
