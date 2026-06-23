@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-cov"]
+dev = ["pytest>=9.1.1", "pytest-cov"]
 
 [project.scripts]
 wat = "wat.cli:app"
