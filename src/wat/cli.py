@@ -43,7 +43,8 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 
-# Map iOS message types to human-readable category names
+# Map iOS message types to human-readable category names for the summary table.
+# These labels are display-only (not used in conversion logic).
 _TYPE_LABELS: dict[int, str] = {
     0: "text",
     1: "image",
@@ -96,9 +97,17 @@ def _add_media_rows(tbl: Table, media_stats: dict) -> None:
 def _filter_corpus(corpus: Corpus, chats_spec: str) -> Corpus:
     """Return a new Corpus containing only the chats matching *chats_spec*.
 
-    *chats_spec* is a comma-separated string. Each token is interpreted as:
-      - an integer  -> match by ``Chat.pk``
+    *chats_spec* is a comma-separated string where each token is interpreted as:
+      - an integer  -> match by ``Chat.pk`` (useful for scripting / exact selection)
       - a string    -> case-insensitive substring match against ``Chat.partner_name``
+                       (useful for interactive use: ``--chats "John,Family Group"``)
+
+    This dual-mode matching (PKs and names) lets users filter chats without
+    needing to look up internal IDs first. The function builds a set of
+    matching chat PKs, then returns a new Corpus with only the matching
+    chats, their messages, and their group members. push_names are kept
+    in full (they're lightweight and may be needed for display-name lookups
+    even for contacts outside the selected chats).
     """
     tokens = [t.strip() for t in chats_spec.split(",") if t.strip()]
     if not tokens:
@@ -232,7 +241,12 @@ def run(
     """Full pipeline -- extract, convert, remap media, encrypt."""
     import tempfile
 
-    # Validate mutually-exclusive sources
+    # --ios and --backup are mutually exclusive because they represent two
+    # different starting points for the pipeline:
+    # - --backup: raw iTunes backup directory (needs extraction first)
+    # - --ios: already-extracted directory (skip extraction, go straight to parse)
+    # Providing both would be ambiguous — which source wins? Rather than
+    # defining precedence rules, we require exactly one.
     if ios and backup:
         console.print("[red]Error:[/red] --ios and --backup are mutually exclusive.")
         raise typer.Exit(code=1)

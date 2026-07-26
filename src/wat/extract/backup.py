@@ -30,7 +30,11 @@ def detect_backup_type(backup_dir: Path) -> str | None:
     if not manifest_db.exists():
         return None
 
-    # If Manifest.plist exists, check for encryption markers
+    # Check Manifest.plist for the IsEncrypted boolean key. Apple sets
+    # this flag to True when the user enables "Encrypt local backup" in
+    # iTunes/Finder. When encrypted, file contents in Manifest.db are
+    # wrapped with a key derived from the backup passphrase, requiring
+    # iphone_backup_decrypt (or equivalent) to extract.
     if manifest_plist.exists():
         try:
             import plistlib
@@ -50,6 +54,8 @@ def _compute_file_id(domain: str, relative_path: str) -> str:
     """Compute the SHA-1 hash used as file ID in iTunes backups.
 
     iTunes uses sha1(domain + '-' + relativePath) as the on-disk filename.
+    This content-addressing scheme allows Apple to store all backup files
+    in a flat(ish) directory structure without path collisions.
     """
     raw = f"{domain}-{relative_path}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
@@ -95,7 +101,11 @@ def extract_from_unencrypted_backup(
     chat_storage_found = False
 
     for file_id, domain, relative_path in rows:
-        # Source file in hashed storage: <backup>/<first2chars>/<fileID>
+        # Unencrypted backup file layout: files are stored at
+        # <backup_dir>/<first 2 hex chars of SHA-1>/<full SHA-1 hash>.
+        # The two-character prefix subdirectory is a bucketing strategy
+        # to avoid having millions of files in a single directory (which
+        # would degrade filesystem performance on HFS+/APFS).
         src = backup_dir / file_id[:2] / file_id
 
         if not src.exists():

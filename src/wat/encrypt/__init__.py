@@ -44,13 +44,21 @@ def encrypt_db(db_path: Path, key_path: Path, output_path: Path) -> None:
             f"Key file must be exactly 32 bytes, got {len(key_bytes)}"
         )
 
+    # Key15 accepts the raw 32-byte key material. Internally it derives
+    # the AES-256-GCM encryption key and HMAC key from this root material
+    # using WhatsApp's key derivation scheme. The raw_key format is specific
+    # to crypt15 (earlier crypt formats used different key structures).
     key = Key15(key=key_bytes)
 
-    # Read and compress the plaintext database
+    # Read and compress the plaintext database.
+    # Compression level 1 (fastest): WhatsApp uses zlib level 1 by convention.
+    # Higher levels would produce smaller output but WhatsApp Android expects
+    # level-1 compressed data — using a different level could cause the
+    # decompressor to reject the payload or produce mismatched checksums.
     plaintext = db_path.read_bytes()
     compressed = zlib.compress(plaintext, 1)
 
-    # Build a Database15 object (generates a random IV) and encrypt
+    # Build a Database15 object (generates a random IV) and encrypt.
     db = Database15(key=key)
     props = Props()
     encrypted = db.encrypt(key, props, compressed)

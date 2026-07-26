@@ -61,11 +61,20 @@ class MediaRemapper:
     """Stateful remapper that tracks per-date sequence counters.
 
     Create one instance per conversion run so counters stay consistent.
+
+    Android WhatsApp naming convention: media files are named with a prefix
+    (IMG, VID, AUD, PTT), followed by a date stamp and a zero-padded
+    sequence number (e.g. IMG-20250413-WA0001.jpg). The sequence counter
+    is global across all media types within a single export, matching how
+    WhatsApp Android itself assigns "WA" numbers. Using a per-run counter
+    (rather than per-type or per-date) ensures no filename collisions.
     """
 
     def __init__(self, reference_date: date | None = None) -> None:
         self._date = reference_date or date.today()
-        self._seq: int = 0  # global counter across all media types
+        # Global counter across all media types — Android WhatsApp uses a single
+        # monotonic "WA" sequence number, not per-type counters.
+        self._seq: int = 0
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -85,7 +94,12 @@ class MediaRemapper:
         seq = self._next_seq()
 
         if effective_mime is not None and effective_mime.startswith("audio/"):
-            # Voice notes: check for "ptt" in the original path
+            # Voice notes: WhatsApp iOS stores push-to-talk (voice note) files
+            # with "ptt" in the path (e.g. ".../ptt/..." or filename containing
+            # "ptt"). This is a WhatsApp convention across both platforms —
+            # "PTT" stands for Push-To-Talk. Detecting it in the path is the
+            # most reliable way to distinguish voice notes from regular audio
+            # attachments, since both share the same MIME types.
             if "ptt" in ios_path.lower():
                 return f"WhatsApp Voice Notes/PTT-{date_str}-WA{seq:04d}.opus"
             ext = _ext_for(ios_path, effective_mime)
@@ -120,7 +134,14 @@ class MediaRemapper:
 
 
 def _resolve_mime(ios_path: str, mime_type: str | None) -> str | None:
-    """Return a usable MIME type, falling back to extension-based inference."""
+    """Return a usable MIME type, falling back to extension-based inference.
+
+    Why the fallback: iOS stores the MIME type in ZVCARDSTRING (a misnamed
+    column), but it can be NULL or contain non-MIME values for some message
+    types. When the MIME type is missing or malformed (no "/" separator),
+    we infer it from the file extension using _EXT_TO_MIME. This two-tier
+    approach maximizes the chance of correct media categorization.
+    """
     if mime_type and "/" in mime_type:
         return mime_type
     # Try to infer from extension
